@@ -1,50 +1,98 @@
-from torchvision import models
 import torch.nn as nn
+import torch.nn.functional as F
 
-# Define the ResNet model
-def create_resnet(num_classes, input_channels, pretrained=True):
-    # Load a pre-trained ResNet model
-    model = models.resnet50(pretrained=pretrained)
 
-    # Modify the first convolutional layer to accept single-channel input
-    if input_channels != 3:
-        model.conv1 = nn.Conv2d(input_channels, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+class BasicBlock(nn.Module):
+    expansion = 1
 
-    # Modify the final fully connected layer to match the number of classes
-    num_ftrs = model.fc.in_features
-    model.fc = nn.Sequential(
-        nn.Dropout(0.5),
-        nn.Linear(num_ftrs, num_classes)
-    )
+    def __init__(self, in_planes, planes, stride=1):
+        super(BasicBlock, self).__init__()
+        self.conv1 = nn.Conv2d(
+            in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3,
+                               stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
 
-    return model
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_planes != self.expansion*planes:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_planes, self.expansion*planes,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(self.expansion*planes)
+            )
 
-def create_resnet_3d(num_classes, input_channels):
-    # Define a simple 3D CNN model that mimics ResNet's initial layers
-    class ResNet3D(nn.Module):
-        def __init__(self, num_classes, input_channels):
-            super(ResNet3D, self).__init__()
-            self.conv1 = nn.Conv3d(input_channels, 64, kernel_size=7, stride=(2, 2, 2), padding=(3, 3, 3), bias=False)
-            self.bn1 = nn.BatchNorm3d(64)
-            self.relu = nn.ReLU(inplace=True)
-            self.maxpool = nn.MaxPool3d(kernel_size=3, stride=2, padding=1)
-            # ... You would need to continue and define the rest of the ResNet blocks using 3D layers
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
 
-            # This is just a placeholder for the adaptive pooling layer and the final fully connected layer
-            self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))
-            self.fc = nn.Linear(64, num_classes)  # Adjust the size according to your architecture
 
-        def forward(self, x):
-            x = self.conv1(x)
-            x = self.bn1(x)
-            x = self.relu(x)
-            x = self.maxpool(x)
-            # ... The rest of the forward pass through the ResNet blocks
+class Bottleneck(nn.Module):
+    expansion = 4
 
-            x = self.avgpool(x)
-            x = torch.flatten(x, 1)
-            x = self.fc(x)
-            return x
+    def __init__(self, in_planes, planes, stride=1):
+        super(Bottleneck, self).__init__()
+        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3,
+                               stride=stride, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.conv3 = nn.Conv2d(planes, self.expansion *
+                               planes, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(self.expansion*planes)
 
-    return ResNet3D(num_classes, input_channels)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_planes != self.expansion*planes:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_planes, self.expansion*planes,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(self.expansion*planes)
+            )
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = F.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
+
+
+class ResNet(nn.Module):
+    def __init__(self, block, num_blocks, in_channels=1, num_classes=2):
+        super(ResNet, self).__init__()
+        self.in_planes = 64
+
+        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3,
+                               stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
+        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.linear = nn.Linear(512 * block.expansion, num_classes)
+
+    def _make_layer(self, block, planes, num_blocks, stride):
+        strides = [stride] + [1]*(num_blocks-1)
+        layers = []
+        for stride in strides:
+            layers.append(block(self.in_planes, planes, stride))
+            self.in_planes = planes * block.expansion
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        out = self.avgpool(out)
+        out = out.view(out.size(0), -1)
+        out = self.linear(out)
+        return out
 
